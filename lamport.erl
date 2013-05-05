@@ -30,7 +30,7 @@
 %% @end
 %%--------------------------------------------------------------------
 start_link(Parent) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], [Parent]).
+    gen_server:start_link(?MODULE, [], [Parent]).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -47,7 +47,7 @@ start_link(Parent) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Parent]) ->
+init(Parent) ->
     timer:send_after(?TIMER_TICK, tick),
     {ok, #state{time = 0, parent = Parent, queue = gb_trees:empty()}}.
 
@@ -80,24 +80,23 @@ handle_call(_Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast({cast, Msg}, State = #state{time = Time}) ->
-    some_caster:broadcast({syn, Msg, Time}),
+    lamport_sup:broadcast({syn, Msg, Time}),
     {noreply, State};
 handle_cast({syn, Msg, Time}, State = #state{queue = Queue}) ->
-    NewQueue = gb_trees:insert(Time, {Msg, gb_sets:from_list(some_caster:all_nodes())}, Queue),
-    some_caster:broadcast({acc, self()}),
+    erlang:display({syn, Time}),
+    NewQueue = gb_trees:insert(Time, {Msg, gb_sets:from_list(lamport_sup:all_pids())}, Queue),
+    lamport_sup:broadcast({acc, Time, self()}),
     {noreply, State#state{queue = NewQueue}};
 handle_cast({acc, Time, From}, State = #state{queue = Queue, parent = Parent}) ->
     {Msg, NotAcc} = gb_trees:lookup(Time, Queue),
+    erlang:display({acc, Time, From, NotAcc}),
     StillNotAcc = gb_sets:delete(From, NotAcc),
-    NewQueue = case gb_sets:is_empty(StillNotAcc) of
-        true  -> 
-            {OldestMsg, _} = gb_trees:smallest(Queue),
-                if OldestMsg == Time ->
-                        Parent ! Msg,
-                        gb_sets:delete(Time);
-                    true -> ok
-                end;
-        false -> 
+    NewQueue = case gb_sets:is_empty(StillNotAcc) andalso {Msg, NotAcc} == gb_trees:smallest(Queue) of
+        true  ->
+            Parent ! Msg,
+            erlang:display(Msg),
+            gb_sets:delete(Time, Queue);
+        false ->
             gb_trees:update(Time, {Msg, StillNotAcc}, Queue)
     end,
     {noreply, State#state{queue = NewQueue}};
