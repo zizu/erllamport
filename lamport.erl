@@ -13,30 +13,30 @@
          terminate/2,
          code_change/3]).
 
--record(state, {parent, time, queue}).
+-record(state, {parent, time, queue, pg}).
 
 %% Lamport timer tick im msecs
 -define(TIMER_TICK, 1000).
 
-start_link(Parent) ->
-    gen_server:start_link(?MODULE, Parent, []).
+start_link([Parent, Pg]) ->
+    gen_server:start_link(?MODULE, [Parent, Pg], []).
 
-init(Parent) ->
+init([Parent, Pg]) ->
     timer:send_interval(?TIMER_TICK, tick),
-    {ok, #state{time = 0, parent = Parent, queue = gb_trees:empty()}}.
+    {ok, #state{time = 0, parent = Parent, queue = gb_trees:empty(), pg = Pg}}.
 
 handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.
 
-handle_cast({cast, Msg}, State = #state{time = Time}) ->
+handle_cast({cast, Msg}, State = #state{time = Time, pg = Pg}) ->
     NewTime = Time + 1,
-    lamport_sup:broadcast({syn, Msg, NewTime, self()}),
+    broadcast({syn, Msg, NewTime, self()}, Pg),
     {noreply, State#state{time = NewTime}};
-handle_cast({syn, Msg, Time, From}, State = #state{queue = Queue, time = SelfTime}) ->
+handle_cast({syn, Msg, Time, From}, State = #state{queue = Queue, time = SelfTime, pg = Pg}) ->
     NewTime = new_time(Time, SelfTime),
-    NewQueue = gb_trees:insert({Time, From}, {Msg, gb_sets:from_list(lamport_sup:all_pids())}, Queue),
-    lamport_sup:broadcast({acc, {Time, From}, NewTime, self()}),
+    NewQueue = gb_trees:insert({Time, From}, {Msg, gb_sets:from_list(pg2:get_members(Pg))}, Queue),
+    broadcast({acc, {Time, From}, NewTime, self()}, Pg),
     {noreply, State#state{queue = NewQueue, time = NewTime}};
 handle_cast({acc, MsgId, Time, From}, State = #state{queue = Queue, parent = Parent, time = SelfTime}) ->
     NewTime = new_time(Time, SelfTime),
@@ -68,3 +68,6 @@ code_change(_OldVsn, State, _Extra) ->
 
 new_time(T1, T2) ->
     max(T1, T2) + 1.
+
+broadcast(Msg, Pg) ->
+    [gen_server:cast(Pid, Msg) || Pid <- pg2:get_members(Pg)].
