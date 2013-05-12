@@ -79,17 +79,17 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast(Msg, State = #state{time = Time}) ->
-    handle_cast_internal(Msg, State#state{time = Time + 1}).
-
-handle_cast_internal({cast, Msg}, State = #state{time = Time}) ->
-    lamport_sup:broadcast({syn, Msg, Time, self()}),
-    {noreply, State};
-handle_cast_internal({syn, Msg, Time, From}, State = #state{queue = Queue}) ->
+handle_cast({cast, Msg}, State = #state{time = Time}) ->
+    NewTime = Time + 1,
+    lamport_sup:broadcast({syn, Msg, NewTime, self()}),
+    {noreply, State#state{time = NewTime}};
+handle_cast({syn, Msg, Time, From}, State = #state{queue = Queue, time = SelfTime}) ->
+    NewTime = new_time(Time, SelfTime),
     NewQueue = gb_trees:insert({Time, From}, {Msg, gb_sets:from_list(lamport_sup:all_pids())}, Queue),
-    lamport_sup:broadcast({acc, {Time, From}, self()}),
-    {noreply, State#state{queue = NewQueue}};
-handle_cast_internal({acc, MsgId, From}, State = #state{queue = Queue, parent = Parent}) ->
+    lamport_sup:broadcast({acc, {Time, From}, NewTime, self()}),
+    {noreply, State#state{queue = NewQueue, time = NewTime}};
+handle_cast({acc, MsgId, Time, From}, State = #state{queue = Queue, parent = Parent, time = SelfTime}) ->
+    NewTime = new_time(Time, SelfTime),
     {value, {Msg, NotAcc}} = gb_trees:lookup(MsgId, Queue),
     StillNotAcc = gb_sets:delete(From, NotAcc),
     NewQueue = gb_trees:update(MsgId, {Msg, StillNotAcc}, Queue),
@@ -101,8 +101,8 @@ handle_cast_internal({acc, MsgId, From}, State = #state{queue = Queue, parent = 
         false ->
             NewQueue
     end,
-    {noreply, State#state{queue = NewestQueue}};
-handle_cast_internal(_Msg, State) ->
+    {noreply, State#state{queue = NewestQueue, time = NewTime}};
+handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -148,3 +148,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+new_time(T1, T2) ->
+    max(T1, T2) + 1.
