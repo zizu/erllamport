@@ -20,6 +20,7 @@ start_link([Parent, Pg]) ->
     gen_server:start_link(?MODULE, [Parent, Pg], []).
 
 init([Parent, Pg]) ->
+    pg2:join(Pg, self()),
     timer:send_interval(?TIMER_TICK, tick),
     {ok, #state{time = 0, parent = Parent, queue = gb_trees:empty(), pg = Pg}}.
 
@@ -38,20 +39,18 @@ handle_cast({syn, Msg, Time, From}, State = #state{queue = Queue, time = SelfTim
     broadcast({acc, {Time, From}, NewTime, self()}, Pg),
     {noreply, State#state{queue = NewQueue, time = NewTime}};
 
-handle_cast({acc, MsgId, Time, From}, State = #state{queue = Queue, parent = Parent, time = SelfTime}) ->
+handle_cast(Acc = {acc, MsgId, Time, From}, State = #state{queue = Queue, parent = Parent, time = SelfTime}) ->
     NewTime = new_time(Time, SelfTime),
-    {value, {Msg, NotAcc}} = gb_trees:lookup(MsgId, Queue),
-    StillNotAcc = gb_sets:delete(From, NotAcc),
-    UpdatedQueue = gb_trees:update(MsgId, {Msg, StillNotAcc}, Queue),
-    {SmallestKey, {SmallestMsg, SmallestNotAcc}} = gb_trees:smallest(UpdatedQueue),
-    NewQueue = case gb_sets:is_empty(SmallestNotAcc) of
-        true  ->
-            Parent ! SmallestMsg,
-            gb_trees:delete(SmallestKey, UpdatedQueue);
-        false ->
-            UpdatedQueue
-    end,
-    {noreply, State#state{queue = NewQueue, time = NewTime}};
+    case gb_trees:lookup(MsgId, Queue) of
+        {value, {Msg, NotAcc}} ->
+            StillNotAcc = gb_sets:delete(From, NotAcc),
+            UpdatedQueue = gb_trees:update(MsgId, {Msg, StillNotAcc}, Queue),
+            NewQueue = send_acked(UpdatedQueue, Parent),
+            {noreply, State#state{queue = NewQueue, time = NewTime}};
+        none -> % acc before syn
+            gen_server:cast(self(), Acc),
+            {noreply, State}
+    end;
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -72,3 +71,19 @@ new_time(T1, T2) ->
 
 broadcast(Msg, Pg) ->
     [gen_server:cast(Pid, Msg) || Pid <- pg2:get_members(Pg)].
+
+send_acked(Queue, Parent) ->
+    {SmallestKey, {SmallestMsg, SmallestNotAcc}} = gb_trees:smallest(Queue),
+    case gb_sets:is_empty(SmallestNotAcc) of
+        true  ->
+            Parent ! SmallestMsg,
+            NewQueue = gb_trees:delete(SmallestKey, Queue),
+            case gb_trees:is_empty(NewQueue) of
+                false ->
+                    send_acked(NewQueue, Parent);
+                true ->
+                    NewQueue
+            end;
+        false ->
+            Queue
+    end.
