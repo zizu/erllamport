@@ -2,10 +2,8 @@
 
 -behaviour(gen_server).
 
-%% API
 -export([start_link/1]).
 
-%% gen_server callbacks
 -export([init/1,
          handle_call/3,
          handle_cast/2,
@@ -33,25 +31,28 @@ handle_cast({cast, Msg}, State = #state{time = Time, pg = Pg}) ->
     NewTime = Time + 1,
     broadcast({syn, Msg, NewTime, self()}, Pg),
     {noreply, State#state{time = NewTime}};
+
 handle_cast({syn, Msg, Time, From}, State = #state{queue = Queue, time = SelfTime, pg = Pg}) ->
     NewTime = new_time(Time, SelfTime),
     NewQueue = gb_trees:insert({Time, From}, {Msg, gb_sets:from_list(pg2:get_members(Pg))}, Queue),
     broadcast({acc, {Time, From}, NewTime, self()}, Pg),
     {noreply, State#state{queue = NewQueue, time = NewTime}};
+
 handle_cast({acc, MsgId, Time, From}, State = #state{queue = Queue, parent = Parent, time = SelfTime}) ->
     NewTime = new_time(Time, SelfTime),
     {value, {Msg, NotAcc}} = gb_trees:lookup(MsgId, Queue),
     StillNotAcc = gb_sets:delete(From, NotAcc),
-    NewQueue = gb_trees:update(MsgId, {Msg, StillNotAcc}, Queue),
-    {SmallestKey, {SmallestMsg, SmallestNotAcc}} = gb_trees:smallest(NewQueue),
-    NewestQueue = case gb_sets:is_empty(SmallestNotAcc) of
+    UpdatedQueue = gb_trees:update(MsgId, {Msg, StillNotAcc}, Queue),
+    {SmallestKey, {SmallestMsg, SmallestNotAcc}} = gb_trees:smallest(UpdatedQueue),
+    NewQueue = case gb_sets:is_empty(SmallestNotAcc) of
         true  ->
             Parent ! SmallestMsg,
-            gb_trees:delete(SmallestKey, NewQueue);
+            gb_trees:delete(SmallestKey, UpdatedQueue);
         false ->
-            NewQueue
+            UpdatedQueue
     end,
-    {noreply, State#state{queue = NewestQueue, time = NewTime}};
+    {noreply, State#state{queue = NewQueue, time = NewTime}};
+
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
